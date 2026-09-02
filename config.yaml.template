@@ -9,6 +9,8 @@ bind-address: '*'
 mode: rule
 log-level: ${LOG_LEVEL}
 external-controller: '0.0.0.0:9090'
+external-controller-cors:
+  - '*'
 secret: '${CLASH_SECRET}'
 
 # 网络增强
