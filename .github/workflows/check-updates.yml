@@ -1,0 +1,136 @@
+name: Update Versions
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Get valid Mihomo version
+        id: mihomo
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const checkVersion = require('./.github/workflows/scripts/check-version.js');
+            const mihomoVersion = await checkVersion.getLatestValidVersion(
+              'MetaCubeX',
+              'mihomo',
+              github,
+              context
+            );
+            console.log(`Mihomo latest: ${mihomoVersion}`);
+            return mihomoVersion;
+
+      - name: Get valid Zashboard version
+        id: zashboard
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const checkVersion = require('./.github/workflows/scripts/check-version.js');
+            const zashboardVersion = await checkVersion.getLatestValidVersion(
+              'Zephyruso',
+              'zashboard',
+              github,
+              context
+            );
+            console.log(`Zashboard latest: ${zashboardVersion}`);
+            return zashboardVersion;
+
+      - name: Check current .env versions
+        id: check_versions
+        run: |
+          CURRENT_MI=$(grep -E '^MI_VERSION=' .env | cut -d'=' -f2 || echo '')
+          CURRENT_ZASH=$(grep -E '^ZASHBOARD_VERSION=' .env | cut -d'=' -f2 || echo '')
+          echo "Current: MI=$CURRENT_MI ZASH=$CURRENT_ZASH"
+          MI_LATEST="${{ steps.mihomo.outputs.result }}"
+          ZASH_LATEST="${{ steps.zashboard.outputs.result }}"
+          echo "Latest:  MI=$MI_LATEST ZASH=$ZASH_LATEST"
+          MI_CHANGED=false; ZASH_CHANGED=false; NEEDS_UPDATE=false
+          [ -n "$MI_LATEST" ] && [ "$CURRENT_MI" != "$MI_LATEST" ] && MI_CHANGED=true && NEEDS_UPDATE=true
+          [ -n "$ZASH_LATEST" ] && [ "$CURRENT_ZASH" != "$ZASH_LATEST" ] && ZASH_CHANGED=true && NEEDS_UPDATE=true
+          echo "mi_changed=$MI_CHANGED" >> $GITHUB_OUTPUT
+          echo "zash_changed=$ZASH_CHANGED" >> $GITHUB_OUTPUT
+          echo "needs_update=$NEEDS_UPDATE" >> $GITHUB_OUTPUT
+          [ "$NEEDS_UPDATE" = "false" ] && echo "Versions unchanged. No update needed." || true
+
+      - name: Update .env file
+        if: ${{ steps.mihomo.outputs.result != '' && steps.zashboard.outputs.result != '' && steps.check_versions.outputs.needs_update == 'true' }}
+        run: |
+          if [ "${{ steps.check_versions.outputs.mi_changed }}" = "true" ]; then
+            if grep -q "^MI_VERSION=" .env; then
+              sed -i "s/^MI_VERSION=.*/MI_VERSION=${{ steps.mihomo.outputs.result }}/" .env
+            else echo "MI_VERSION=${{ steps.mihomo.outputs.result }}" >> .env; fi
+          fi
+          if [ "${{ steps.check_versions.outputs.zash_changed }}" = "true" ]; then
+            if grep -q "^ZASHBOARD_VERSION=" .env; then
+              sed -i "s/^ZASHBOARD_VERSION=.*/ZASHBOARD_VERSION=${{ steps.zashboard.outputs.result }}/" .env
+            else echo "ZASHBOARD_VERSION=${{ steps.zashboard.outputs.result }}" >> .env; fi
+          fi
+          cat .env
+
+      - name: Generate commit message
+        id: commit_msg
+        if: ${{ steps.mihomo.outputs.result != '' && steps.zashboard.outputs.result != '' && steps.check_versions.outputs.needs_update == 'true' }}
+        run: |
+          MI_CHANGED="${{ steps.check_versions.outputs.mi_changed }}"
+          ZASH_CHANGED="${{ steps.check_versions.outputs.zash_changed }}"
+          MI_V="${{ steps.mihomo.outputs.result }}"; ZASH_V="${{ steps.zashboard.outputs.result }}"
+          if [ "$MI_CHANGED" = "true" ] && [ "$ZASH_CHANGED" = "true" ]; then
+            MSG="chore: 更新 mihomo内核 $MI_V Zashboard面板 $ZASH_V"
+          elif [ "$MI_CHANGED" = "true" ]; then
+            MSG="chore: 更新 mihomo内核 $MI_V"
+          elif [ "$ZASH_CHANGED" = "true" ]; then
+            MSG="chore: 更新 Zashboard面板 $ZASH_V"
+          else MSG="chore: update versions"; fi
+          echo "commit_message=$MSG" >> $GITHUB_OUTPUT
+
+      - name: Commit and push changes
+        id: commit-step
+        if: ${{ steps.mihomo.outputs.result != '' && steps.zashboard.outputs.result != '' && steps.check_versions.outputs.needs_update == 'true' }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .env; git commit -m "${{ steps.commit_msg.outputs.commit_message }}"
+          n=0; max_retries=3; delay=5
+          until [ $n -ge $max_retries ]
+          do
+            git pull --rebase && git push && break
+            n=$((n+1)); echo "Attempt $n failed, retry in ${delay}s..."; sleep $delay
+          done
+          [ $n -eq $max_retries ] && echo "::warning::Failed to push after $max_retries attempts" && exit 1
+          echo "changes_committed=true" >> $GITHUB_OUTPUT
+
+      - name: Trigger Docker Build workflow
+        if: ${{ steps.commit-step.outputs.changes_committed == 'true' }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            try {
+              await github.rest.actions.createWorkflowDispatch({
+                owner: context.repo.owner, repo: context.repo.repo,
+                workflow_id: 'docker-build.yml', ref: 'main',
+              });
+              console.log('Docker Build triggered.');
+            } catch (e) { console.error('Trigger failed:', e); }
+
+      - name: Skip update if versions unchanged
+        if: ${{ steps.mihomo.outputs.result != '' && steps.zashboard.outputs.result != '' && steps.check_versions.outputs.needs_update == 'false' }}
+        run: |
+          echo "Skipping: versions already match latest"
+          echo "MI_VERSION=${{ steps.mihomo.outputs.result }}"
+          echo "ZASHBOARD_VERSION=${{ steps.zashboard.outputs.result }}"
+
+      - name: Skip update if no valid versions
+        if: ${{ steps.mihomo.outputs.result == '' || steps.zashboard.outputs.result == '' }}
+        run: |
+          echo "Skipping: missing valid versions"
+          echo "Mihomo: ${{ steps.mihomo.outputs.result || 'none' }}"
+          echo "Zashboard: ${{ steps.zashboard.outputs.result || 'none' }}"
