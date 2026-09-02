@@ -1,0 +1,72 @@
+{
+    admin off
+    log {
+        level INFO
+    }
+}
+
+:8080 {
+    # 服务器级别的日志配置
+    log {
+        output stdout
+        format console
+        level INFO
+    }
+
+    # 启用压缩
+    encode gzip zstd
+
+    # 安全头
+    header {
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+        X-XSS-Protection "1; mode=block"
+        Referrer-Policy strict-origin-when-cross-origin
+        Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self'; connect-src *;"
+        Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+        X-Permitted-Cross-Domain-Policies "none"
+        Permissions-Policy "geolocation=(), microphone=(), camera=()"
+        -Server
+    }
+
+    # 全局错误处理
+    handle_errors {
+        @404 {
+            expression {http.error.status_code} == 404
+        }
+        rewrite @404 /index.html
+        file_server
+    }
+
+    # API 路由 - 使用路径重写
+    handle /api/* {
+        # 重写路径：移除 /api 前缀
+        rewrite * /{path.import}
+
+        reverse_proxy localhost:9090 {
+            header_up Host {host}
+            header_up X-Real-IP {remote}
+            flush_interval -1
+        }
+
+        # API 特定头
+        header {
+            Access-Control-Allow-Origin "*"
+            Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS"
+            Access-Control-Allow-Headers "Content-Type, Authorization, X-API-Key"
+            Access-Control-Allow-Credentials "true"
+        }
+    }
+
+    # 静态文件服务（Zashboard 产物）
+    handle {
+        # 文件服务器配置
+        file_server {
+            precompressed gzip zstd
+        }
+        root * .
+
+        # SPA 路由支持（zashboard 使用 hash 路由，此兜底保留以兼容未来调整）
+        try_files {path} /index.html
+    }
+}

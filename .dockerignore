@@ -1,0 +1,10 @@
+# Docker 构建忽略规则
+.git
+.gitignore
+.github
+*.md
+img/
+readme/
+node_modules/
+dist/
+.output/
