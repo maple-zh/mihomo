@@ -22,6 +22,7 @@
         X-Frame-Options DENY
         X-XSS-Protection "1; mode=block"
         Referrer-Policy strict-origin-when-cross-origin
+        # connect-src 放宽允许直连 Mihomo external-controller（任意 origin:port）
         Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self'; connect-src *;"
         Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
         X-Permitted-Cross-Domain-Policies "none"
@@ -38,23 +39,34 @@
         file_server
     }
 
-    # API 路由 - 使用路径重写
+    # API 路由 - 反代到 Mihomo external-controller (localhost:9090)
     handle /api/* {
-        # 重写路径：移除 /api 前缀
-        rewrite * /{path.import}
-
-        reverse_proxy localhost:9090 {
-            header_up Host {host}
-            header_up X-Real-IP {remote}
-            flush_interval -1
+        # --- 通用 CORS 响应头（对所有 /api/* 请求，包括 OPTIONS 预检）---
+        #     用 header + defer 保证在反向代理之后也能生效
+        header {
+            Access-Control-Allow-Origin  "*"
+            Access-Control-Allow-Methods "GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD"
+            Access-Control-Allow-Headers "Content-Type, Authorization, X-API-Key, Origin, Accept, Accept-Language, Cache-Control"
+            Access-Control-Expose-Headers "Content-Length, Content-Type, Cache-Control"
+            Access-Control-Max-Age       "86400"
+            Access-Control-Allow-Credentials "false"
+            defer
         }
 
-        # API 特定头
-        header {
-            Access-Control-Allow-Origin "*"
-            Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS"
-            Access-Control-Allow-Headers "Content-Type, Authorization, X-API-Key"
-            Access-Control-Allow-Credentials "true"
+        # --- OPTIONS 预检请求直接短路返回 204，不打到 mihomo ---
+        #     否则 mihomo 可能返回错误或缺少 Allow-Headers / Allow-Methods
+        @apiOptions method OPTIONS
+        respond @apiOptions 204
+
+        # --- 非预检请求：去掉 /api 前缀后代理到 mihomo:9090 ---
+        rewrite * /{path.import}
+        reverse_proxy localhost:9090 {
+            header_up Host        {host}
+            header_up X-Real-IP   {remote}
+            header_up X-Forwarded-For {remote}
+            header_up X-Forwarded-Proto {scheme}
+            # 告诉 mihomo 上游不要加它自己的 CORS（我们在 Caddy 层统一处理了）
+            flush_interval -1
         }
     }
 
